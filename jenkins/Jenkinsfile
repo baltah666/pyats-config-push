@@ -1,184 +1,220 @@
-// ======================================================
-// Jenkinsfile
-// Project : pyats-config-push
-// Version : v2.1.2
-//
-// ------------------------------------------------------
-// FIXES IN v2.1.2
-// ------------------------------------------------------
-//
-// ❌ PROBLEM (v2.1.1):
-// - Python script (--list-devices) returns devices
-//   one-per-line (newline separated)
-// - Jenkinsfile incorrectly split on commas
-// - Result: ALL devices treated as ONE string
-//
-// ✅ FIX (v2.1.2):
-// - Split device list by newline instead of comma
-// - Trim empty lines
-// - Validate device discovery before running parallel
-//
-// ======================================================
+/*
+File: jenkins/Jenkinsfile
+Project: pyats-config-push
+Version: 2.1.0
+Date: 2026-01-29
+
+Goal
+----
+Show Jenkins parallel "graph" per device while pushing config with pyATS.
+
+How it works
+------------
+1) Checkout repo
+2) Create/reuse venv
+3) Install deps (best-effort)
+4) Discover devices from testbed (python --list-devices)
+5) Create Jenkins parallel branches: one per device
+6) Each branch runs python script with --devices <device>
+
+Notes
+-----
+- The script writes logs into logs/<device>.log
+- Jenkins archives logs for troubleshooting
+*/
 
 pipeline {
-    agent any
+  agent any
 
-    options {
-        timestamps()
-        ansiColor('xterm')
+  options {
+    timestamps()
+    ansiColor('xterm')
+    disableConcurrentBuilds()
+  }
+
+  parameters {
+    choice(
+      name: 'TESTBED_FILE',
+      choices: [
+        'testbeds/testbed_access_2960.yaml'
+      ],
+      description: 'Select the pyATS testbed YAML file'
+    )
+
+    text(
+      name: 'CONFIG_COMMANDS',
+      defaultValue: 'ip http server',
+      description: 'Multiline IOS CLI configuration to push'
+    )
+
+    string(
+      name: 'DEVICE_FILTER',
+      defaultValue: 'ALL',
+      description: 'Comma-separated device list OR ALL'
+    )
+
+    booleanParam(
+      name: 'WRITE_MEMORY',
+      defaultValue: true,
+      description: 'Run "write memory" after pushing config'
+    )
+  }
+
+  environment {
+    VENV_DIR = "pyats-venv"
+    PY = "python3.11"
+  }
+
+  stages {
+
+    stage('Task 1 - Checkout SCM') {
+      steps {
+        checkout scm
+        sh 'echo "✅ Repo checked out (SCM)"'
+      }
     }
 
-    parameters {
-        text(
-            name: 'CONFIG',
-            description: 'CLI configuration to push (raw commands)',
-            trim: true
-        )
-        booleanParam(
-            name: 'WRITE_MEMORY',
-            defaultValue: true,
-            description: 'Save configuration after push'
-        )
+    stage('Task 2.1 - Verify Python') {
+      steps {
+        sh '''
+          set -e
+          echo "Using Python:"
+          ${PY} --version
+        '''
+      }
     }
 
-    environment {
-        PYTHON_BIN = 'python3.11'
-        VENV_DIR  = 'pyats-venv'
-        TESTBED   = 'testbeds/testbed_access_2960.yaml'
+    stage('Task 2.2 - Create / Reuse Virtualenv') {
+      steps {
+        sh '''
+          set -e
+          if [ ! -d "${VENV_DIR}" ]; then
+            echo "Creating venv: ${VENV_DIR}"
+            ${PY} -m venv "${VENV_DIR}"
+          else
+            echo "Virtualenv already exists, reusing it"
+          fi
+        '''
+      }
     }
 
-    stages {
+    stage('Task 2.3 - Install Python dependencies') {
+      steps {
+        sh '''
+          set -e
+          . ${VENV_DIR}/bin/activate
+          python -m pip install --upgrade pip
 
-        // --------------------------------------------------
-        stage('Task 1 - Checkout SCM') {
-            steps {
-                checkout scm
-                echo '✅ Repo checked out (SCM)'
-            }
-        }
+          # If you later add requirements.txt, it will be used automatically.
+          if [ -f requirements.txt ]; then
+            echo "Installing from requirements.txt"
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found – installing minimal deps"
+            pip install pyats==24.3 genie==24.3 unicon==24.3
+          fi
+        '''
+      }
+    }
 
-        // --------------------------------------------------
-        stage('Task 2.1 - Verify Python') {
-            steps {
-                sh '''
-                    set -e
-                    echo "Using Python:"
-                    python3.11 --version
-                '''
-            }
-        }
-
-        // --------------------------------------------------
-        stage('Task 2.2 - Create / Reuse Virtualenv') {
-            steps {
-                sh '''
-                    set -e
-                    if [ ! -d "${VENV_DIR}" ]; then
-                        python3.11 -m venv ${VENV_DIR}
-                    else
-                        echo "Virtualenv already exists, reusing it"
-                    fi
-                '''
-            }
-        }
-
-        // --------------------------------------------------
-        stage('Task 2.3 - Install Python dependencies') {
-            steps {
-                sh '''
-                    set -e
-                    . ${VENV_DIR}/bin/activate
-                    python -m pip install --upgrade pip
-
-                    if [ -f requirements.txt ]; then
-                        pip install -r requirements.txt
-                    else
-                        pip install pyats==24.3 genie==24.3 unicon==24.3
-                    fi
-                '''
-            }
-        }
-
-        // --------------------------------------------------
-        stage('Task 2.4 - Verify Imports') {
-            steps {
-                sh '''
-                    set -e
-                    . ${VENV_DIR}/bin/activate
-                    python - << 'EOF'
-import pyats, genie, unicon
+    stage('Task 2.4 - Verify Imports') {
+      steps {
+        sh '''
+          set -e
+          . ${VENV_DIR}/bin/activate
+          python - << 'PY'
+import pyats
+import genie
+import unicon
 print("pyATS import OK")
 print("Genie import OK")
 print("Unicon import OK")
-EOF
-                '''
-            }
-        }
-
-        // --------------------------------------------------
-        stage('Task 3 - Push Config (Parallel per Device)') {
-            steps {
-                script {
-
-                    // ----------------------------------------------
-                    // Discover devices (newline-separated output)
-                    // ----------------------------------------------
-                    def rawOutput = sh(
-                        script: """
-                            . ${VENV_DIR}/bin/activate
-                            ${PYTHON_BIN} scripts/config_push.py \
-                              --testbed ${TESTBED} \
-                              --list-devices
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    // ----------------------------------------------
-                    // ✅ FIX v2.1.2: split by newline, not comma
-                    // ----------------------------------------------
-                    def devices = rawOutput
-                        .split('\\n')
-                        .collect { it.trim() }
-                        .findAll { it }
-
-                    if (devices.isEmpty()) {
-                        error "❌ No devices discovered from testbed"
-                    }
-
-                    echo "Discovered devices: ${devices}"
-
-                    def branches = [:]
-
-                    devices.each { dev ->
-                        def deviceName = dev  // capture correctly
-
-                        branches[deviceName] = {
-                            stage("Push → ${deviceName}") {
-                                sh """
-                                    set -e
-                                    . ${VENV_DIR}/bin/activate
-                                    ${PYTHON_BIN} scripts/config_push.py \
-                                      --testbed ${TESTBED} \
-                                      --devices ${deviceName} \
-                                      --config "${params.CONFIG}" \
-                                      ${params.WRITE_MEMORY ? '--write-memory' : ''}
-                                """
-                            }
-                        }
-                    }
-
-                    parallel branches
-                }
-            }
-        }
+PY
+        '''
+      }
     }
 
-    post {
-        success {
-            echo '✅ Pipeline completed successfully'
+    stage('Task 3 - Push Config (Parallel per Device)') {
+      steps {
+        script {
+          sh "mkdir -p logs"
+
+          // 1) Discover devices from testbed
+          def discovered = sh(
+            returnStdout: true,
+            script: """
+              set -e
+              . ${VENV_DIR}/bin/activate
+              ${PY} scripts/config_push.py --testbed '${params.TESTBED_FILE}' --list-devices
+            """
+          ).trim()
+
+          if (!discovered) {
+            error("No devices found in testbed: ${params.TESTBED_FILE}")
+          }
+
+          def allDevices = discovered.split("\\r?\\n") as List
+
+          // 2) Apply DEVICE_FILTER if not ALL
+          def targetDevices = []
+          if (params.DEVICE_FILTER?.trim()?.toUpperCase() == "ALL") {
+            targetDevices = allDevices
+          } else {
+            def wanted = params.DEVICE_FILTER.split(",").collect { it.trim() }.findAll { it }
+            def missing = wanted.findAll { !allDevices.contains(it) }
+            if (missing) {
+              error("DEVICE_FILTER contains unknown device(s): ${missing}. Available: ${allDevices}")
+            }
+            targetDevices = wanted
+          }
+
+          echo "Discovered devices: ${allDevices}"
+          echo "Target devices: ${targetDevices}"
+
+          // 3) Build parallel branches (this creates the Jenkins graph!)
+          def branches = [:]
+          branches.failFast = false
+
+          for (String dev in targetDevices) {
+            branches["${dev}"] = {
+              stage("Push → ${dev}") {
+                sh """
+                  set -e
+                  . ${VENV_DIR}/bin/activate
+
+                  # Run single-device push to produce clean branch results
+                  ${PY} scripts/config_push.py \
+                    --testbed '${params.TESTBED_FILE}' \
+                    --devices '${dev}' \
+                    --config "\$(cat <<'CFG'
+${params.CONFIG_COMMANDS}
+CFG
+)" \
+                    ${params.WRITE_MEMORY ? "--write-memory" : ""}
+
+                """
+              }
+            }
+          }
+
+          parallel branches
         }
-        failure {
-            echo '❌ Pipeline failed – check logs'
+      }
+
+      post {
+        always {
+          archiveArtifacts artifacts: 'logs/**', allowEmptyArchive: true
         }
+      }
     }
+  }
+
+  post {
+    success {
+      echo "✅ Pipeline completed successfully"
+    }
+    failure {
+      echo "❌ Pipeline failed (one or more devices failed)"
+    }
+  }
 }
