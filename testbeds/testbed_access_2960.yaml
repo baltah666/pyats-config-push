@@ -1,20 +1,17 @@
 ---
 # ==========================================================
 # File: testbed_access_2960.yaml
-# Version: 2.1.1
+# Version: 2.1.2
 #
 # FIX IN THIS VERSION:
 # -------------------
-# ✔ Added explicit Unicon legacy handling:
-#     - connection_timeout
-#     - init_exec_commands
-#     - init_config_commands
+# ✔ REMOVED diffie-hellman-group1-sha1
+# ✔ Force ONLY KEX algorithms actually supported by sw01
 #
-# WHY THIS FIX IS REQUIRED:
-# ------------------------
-# Older Catalyst 2960 (IOS 15.2) may fail during Unicon
-# state transitions even when SSH legacy algorithms exist.
-# These settings force a clean "any" state bring-up.
+# ROOT CAUSE:
+# -----------
+# home-lab-access-sw01 (IOS 15.2) rejects group1 and fails
+# SSH negotiation BEFORE Unicon state handling.
 # ==========================================================
 
 testbed:
@@ -24,19 +21,16 @@ testbed:
   credentials:
     default:
       username: admin
-      password: cisco   # TODO: replace with Jenkins credentials
+      password: cisco
 
   custom:
     owner: Abdulilah Baltah
     contacts: Abdulilah,baltah@vattenfall.com
 
-# ==========================================================
-# Devices
-# ==========================================================
 devices:
 
   # ----------------------------------------------------------
-  # Access Switch 01 (OLDEST IOS — REQUIRED EXTRA FIXES)
+  # Access Switch 01 (STRICT SSH – requires clean KEX list)
   # ----------------------------------------------------------
   home-lab-access-sw01:
     alias: home-lab-access-sw01
@@ -49,20 +43,16 @@ devices:
         protocol: ssh
         ip: 192.168.1.50
 
-        # 🔴 Legacy SSH (already correct)
+        # ✅ FIXED: Only algorithms offered by the device
         ssh_options: >
           -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null
-          -o KexAlgorithms=+diffie-hellman-group1-sha1
-          -o KexAlgorithms=+diffie-hellman-group14-sha1
-          -o KexAlgorithms=+diffie-hellman-group-exchange-sha1
-          -o HostKeyAlgorithms=+ssh-rsa
-          -o PubkeyAcceptedAlgorithms=+ssh-rsa
+          -o KexAlgorithms=diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=ssh-rsa
+          -o PubkeyAcceptedAlgorithms=ssh-rsa
 
-        # ✅ NEW: Force Unicon to tolerate slow / old devices
         connection_timeout: 60
 
-        # ✅ NEW: Prevent Unicon from failing during initial state
         arguments:
           learn_hostname: true
           init_exec_commands:
@@ -92,11 +82,9 @@ devices:
         ssh_options: >
           -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null
-          -o KexAlgorithms=+diffie-hellman-group1-sha1
-          -o KexAlgorithms=+diffie-hellman-group14-sha1
-          -o KexAlgorithms=+diffie-hellman-group-exchange-sha1
-          -o HostKeyAlgorithms=+ssh-rsa
-          -o PubkeyAcceptedAlgorithms=+ssh-rsa
+          -o KexAlgorithms=diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=ssh-rsa
+          -o PubkeyAcceptedAlgorithms=ssh-rsa
         arguments:
           learn_hostname: true
 
@@ -122,11 +110,9 @@ devices:
         ssh_options: >
           -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null
-          -o KexAlgorithms=+diffie-hellman-group1-sha1
-          -o KexAlgorithms=+diffie-hellman-group14-sha1
-          -o KexAlgorithms=+diffie-hellman-group-exchange-sha1
-          -o HostKeyAlgorithms=+ssh-rsa
-          -o PubkeyAcceptedAlgorithms=+ssh-rsa
+          -o KexAlgorithms=diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=ssh-rsa
+          -o PubkeyAcceptedAlgorithms=ssh-rsa
         arguments:
           learn_hostname: true
 
