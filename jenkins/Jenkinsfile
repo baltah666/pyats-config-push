@@ -1,31 +1,22 @@
 // ======================================================
 // Jenkinsfile
 // Project : pyats-config-push
-// Version : v2.1.1
-//
-// Purpose:
-// Jenkins Pipeline to push runtime CLI configuration
-// to Cisco devices using pyATS, fully parameter-driven.
+// Version : v2.1.2
 //
 // ------------------------------------------------------
-// FIXES IN v2.1.1
+// FIXES IN v2.1.2
 // ------------------------------------------------------
-// ❌ PROBLEM (v2.1.0):
-// - Jenkins discovered multiple devices correctly
-// - Parallel branches were created
-// - BUT all branches executed against the *last device*
-//   due to Groovy closure variable capture
 //
-// ✅ FIX (v2.1.1):
-// - Introduced a local variable inside the loop:
-//       def deviceName = dev
-// - Each parallel closure now captures its OWN device
+// ❌ PROBLEM (v2.1.1):
+// - Python script (--list-devices) returns devices
+//   one-per-line (newline separated)
+// - Jenkinsfile incorrectly split on commas
+// - Result: ALL devices treated as ONE string
 //
-// This guarantees:
-// Push → sw01
-// Push → sw02
-// Push → sw03
-// (each in its own branch, correctly)
+// ✅ FIX (v2.1.2):
+// - Split device list by newline instead of comma
+// - Trim empty lines
+// - Validate device discovery before running parallel
 //
 // ======================================================
 
@@ -59,8 +50,6 @@ pipeline {
     stages {
 
         // --------------------------------------------------
-        // Task 1 – Checkout repository
-        // --------------------------------------------------
         stage('Task 1 - Checkout SCM') {
             steps {
                 checkout scm
@@ -68,8 +57,6 @@ pipeline {
             }
         }
 
-        // --------------------------------------------------
-        // Task 2.1 – Verify Python
         // --------------------------------------------------
         stage('Task 2.1 - Verify Python') {
             steps {
@@ -82,14 +69,11 @@ pipeline {
         }
 
         // --------------------------------------------------
-        // Task 2.2 – Create / Reuse Virtualenv
-        // --------------------------------------------------
         stage('Task 2.2 - Create / Reuse Virtualenv') {
             steps {
                 sh '''
                     set -e
                     if [ ! -d "${VENV_DIR}" ]; then
-                        echo "Creating virtualenv"
                         python3.11 -m venv ${VENV_DIR}
                     else
                         echo "Virtualenv already exists, reusing it"
@@ -99,8 +83,6 @@ pipeline {
         }
 
         // --------------------------------------------------
-        // Task 2.3 – Install Python dependencies
-        // --------------------------------------------------
         stage('Task 2.3 - Install Python dependencies') {
             steps {
                 sh '''
@@ -109,10 +91,8 @@ pipeline {
                     python -m pip install --upgrade pip
 
                     if [ -f requirements.txt ]; then
-                        echo "Installing from requirements.txt"
                         pip install -r requirements.txt
                     else
-                        echo "No requirements.txt found – installing minimal deps"
                         pip install pyats==24.3 genie==24.3 unicon==24.3
                     fi
                 '''
@@ -120,17 +100,13 @@ pipeline {
         }
 
         // --------------------------------------------------
-        // Task 2.4 – Verify Imports
-        // --------------------------------------------------
         stage('Task 2.4 - Verify Imports') {
             steps {
                 sh '''
                     set -e
                     . ${VENV_DIR}/bin/activate
                     python - << 'EOF'
-import pyats
-import genie
-import unicon
+import pyats, genie, unicon
 print("pyATS import OK")
 print("Genie import OK")
 print("Unicon import OK")
@@ -140,14 +116,14 @@ EOF
         }
 
         // --------------------------------------------------
-        // Task 3 – Push Config (Parallel per Device)
-        // --------------------------------------------------
         stage('Task 3 - Push Config (Parallel per Device)') {
             steps {
                 script {
 
-                    // Discover devices from testbed
-                    def deviceList = sh(
+                    // ----------------------------------------------
+                    // Discover devices (newline-separated output)
+                    // ----------------------------------------------
+                    def rawOutput = sh(
                         script: """
                             . ${VENV_DIR}/bin/activate
                             ${PYTHON_BIN} scripts/config_push.py \
@@ -157,19 +133,24 @@ EOF
                         returnStdout: true
                     ).trim()
 
-                    def devices = deviceList.split(',')
+                    // ----------------------------------------------
+                    // ✅ FIX v2.1.2: split by newline, not comma
+                    // ----------------------------------------------
+                    def devices = rawOutput
+                        .split('\\n')
+                        .collect { it.trim() }
+                        .findAll { it }
+
+                    if (devices.isEmpty()) {
+                        error "❌ No devices discovered from testbed"
+                    }
 
                     echo "Discovered devices: ${devices}"
 
                     def branches = [:]
 
-                    // --------------------------------------------------
-                    // IMPORTANT FIX (v2.1.1)
-                    // --------------------------------------------------
                     devices.each { dev ->
-
-                        // ✅ FIX: capture device per-iteration
-                        def deviceName = dev.trim()
+                        def deviceName = dev  // capture correctly
 
                         branches[deviceName] = {
                             stage("Push → ${deviceName}") {
@@ -186,7 +167,6 @@ EOF
                         }
                     }
 
-                    // Execute per-device in parallel
                     parallel branches
                 }
             }
