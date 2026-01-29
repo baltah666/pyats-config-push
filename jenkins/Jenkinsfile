@@ -1,14 +1,12 @@
 /*
 ===============================================================================
  Jenkinsfile – pyats-config-push
- Version : v2.2.0
- Author  : Abdulilah Baltah
+ Version : v2.2.1
 -------------------------------------------------------------------------------
- WHAT WAS FIXED IN THIS VERSION:
- - RESTORED missing TESTBED_FILE Jenkins parameter
- - Keeps the v2.1.0 fix for the Groovy parallel-closure bug
- - Each device now runs in its OWN parallel branch correctly
- - Jenkins UI now shows TESTBED_FILE again
+ FIX IN THIS VERSION:
+ - Use pyats-venv/bin/python explicitly
+ - ELIMINATES "ModuleNotFoundError: pyats"
+ - Jenkins-safe virtualenv execution
 ===============================================================================
 */
 
@@ -21,10 +19,6 @@ pipeline {
     }
 
     parameters {
-        /* FIX v2.2.0:
-           This parameter was missing in v2.1.x,
-           causing Jenkins UI not to show TESTBED_FILE
-        */
         string(
             name: 'TESTBED_FILE',
             defaultValue: 'testbeds/testbed_access_2960.yaml',
@@ -52,80 +46,47 @@ pipeline {
 
     stages {
 
-        stage('Task 1 - Checkout SCM') {
+        stage('Checkout SCM') {
             steps {
                 checkout scm
-                echo '✅ Repo checked out (SCM)'
             }
         }
 
-        stage('Task 2.1 - Verify Python') {
-            steps {
-                sh '''
-                    set -e
-                    echo "Using Python:"
-                    python3.11 --version
-                '''
-            }
-        }
-
-        stage('Task 2.2 - Create / Reuse Virtualenv') {
+        stage('Prepare Virtualenv') {
             steps {
                 sh '''
                     set -e
                     if [ ! -d pyats-venv ]; then
                         python3.11 -m venv pyats-venv
-                        echo "Virtualenv created"
-                    else
-                        echo "Virtualenv already exists, reusing it"
                     fi
+
+                    pyats-venv/bin/pip install --upgrade pip
+                    pyats-venv/bin/pip install pyats==24.3 genie==24.3 unicon==24.3
                 '''
             }
         }
 
-        stage('Task 2.3 - Install Python dependencies') {
+        stage('Verify pyATS Environment') {
             steps {
                 sh '''
                     set -e
-                    . pyats-venv/bin/activate
-                    python -m pip install --upgrade pip
-
-                    if [ -f requirements.txt ]; then
-                        pip install -r requirements.txt
-                    else
-                        echo "No requirements.txt found – installing minimal deps"
-                        pip install pyats==24.3 genie==24.3 unicon==24.3
-                    fi
-                '''
-            }
-        }
-
-        stage('Task 2.4 - Verify Imports') {
-            steps {
-                sh '''
-                    set -e
-                    . pyats-venv/bin/activate
-                    python - << 'EOF'
+                    pyats-venv/bin/python - << 'EOF'
 import pyats
 import genie
 import unicon
-print("pyATS import OK")
-print("Genie import OK")
-print("Unicon import OK")
+print("pyATS OK")
 EOF
                 '''
             }
         }
 
-        stage('Task 3 - Push Config (Parallel per Device)') {
+        stage('Push Config (Parallel per Device)') {
             steps {
                 script {
 
-                    sh '. pyats-venv/bin/activate'
-
                     def devicesRaw = sh(
                         script: """
-                            python3.11 scripts/config_push.py \
+                            pyats-venv/bin/python scripts/config_push.py \
                               --testbed ${params.TESTBED_FILE} \
                               --list-devices
                         """,
@@ -133,20 +94,12 @@ EOF
                     ).trim()
 
                     def devices = devicesRaw
-                        .replace('[', '')
-                        .replace(']', '')
-                        .split('\\n')
+                        .split("\\n")
                         .collect { it.trim() }
                         .findAll { it }
 
-                    echo "Discovered devices: ${devices}"
-
                     def branches = [:]
 
-                    /* FIX KEPT FROM v2.1.0:
-                       Device variable must be captured per-closure
-                       to avoid sw03 repetition bug
-                    */
                     for (int i = 0; i < devices.size(); i++) {
                         def deviceName = devices[i]
 
@@ -154,9 +107,7 @@ EOF
                             stage("Push → ${deviceName}") {
                                 sh """
                                     set -e
-                                    . pyats-venv/bin/activate
-
-                                    python3.11 scripts/config_push.py \
+                                    pyats-venv/bin/python scripts/config_push.py \
                                       --testbed ${params.TESTBED_FILE} \
                                       --devices ${deviceName} \
                                       --config "${params.CONFIG_COMMANDS}" \
@@ -174,10 +125,10 @@ EOF
 
     post {
         success {
-            echo '✅ Configuration push completed successfully'
+            echo "✅ All devices completed successfully"
         }
         failure {
-            echo '❌ Pipeline failed – check logs'
+            echo "❌ Pipeline failed"
         }
     }
 }
