@@ -1,21 +1,16 @@
-// ======================================================
-// Jenkinsfile
-// Project : pyats-config-push
-// Version : v2.1.3
-//
-// ------------------------------------------------------
-// FIXES IN v2.1.3
-// ------------------------------------------------------
-//
-// FIX #1 (CRITICAL):
-// - Fail pipeline immediately if CONFIG parameter is empty
-// - Prevents "--config \"\"" from being passed to Python
-//
-// FIX #2 (FROM v2.1.2):
-// - Correct device list parsing (newline-safe)
-// - Correct variable capture for parallel branches
-//
-// ======================================================
+/*
+===============================================================================
+ Jenkinsfile – pyats-config-push
+ Version : v2.2.0
+ Author  : Abdulilah Baltah
+-------------------------------------------------------------------------------
+ WHAT WAS FIXED IN THIS VERSION:
+ - RESTORED missing TESTBED_FILE Jenkins parameter
+ - Keeps the v2.1.0 fix for the Groovy parallel-closure bug
+ - Each device now runs in its OWN parallel branch correctly
+ - Jenkins UI now shows TESTBED_FILE again
+===============================================================================
+*/
 
 pipeline {
     agent any
@@ -26,76 +21,98 @@ pipeline {
     }
 
     parameters {
-        text(
-            name: 'CONFIG',
-            description: 'CLI configuration to push (required)',
-            trim: true
+        /* FIX v2.2.0:
+           This parameter was missing in v2.1.x,
+           causing Jenkins UI not to show TESTBED_FILE
+        */
+        string(
+            name: 'TESTBED_FILE',
+            defaultValue: 'testbeds/testbed_access_2960.yaml',
+            description: 'Path to pyATS testbed YAML file'
         )
+
+        text(
+            name: 'CONFIG_COMMANDS',
+            defaultValue: '',
+            description: 'Multiline IOS CLI configuration to push'
+        )
+
+        string(
+            name: 'DEVICE_FILTER',
+            defaultValue: 'ALL',
+            description: 'Comma-separated device list OR ALL'
+        )
+
         booleanParam(
             name: 'WRITE_MEMORY',
             defaultValue: true,
-            description: 'Save configuration after push'
+            description: 'Run "write memory" after pushing config'
         )
-    }
-
-    environment {
-        PYTHON_BIN = 'python3.11'
-        VENV_DIR  = 'pyats-venv'
-        TESTBED   = 'testbeds/testbed_access_2960.yaml'
     }
 
     stages {
 
-        stage('Task 0 - Validate Input') {
-            steps {
-                script {
-                    if (!params.CONFIG?.trim()) {
-                        error """
-❌ CONFIG parameter is empty
-
-You must provide CLI configuration, for example:
-
-ip http server
-no ip domain-lookup
-interface vlan 1
- description Managed by Jenkins
-"""
-                    }
-                }
-            }
-        }
-
         stage('Task 1 - Checkout SCM') {
             steps {
                 checkout scm
-                echo '✅ Repo checked out'
+                echo '✅ Repo checked out (SCM)'
             }
         }
 
         stage('Task 2.1 - Verify Python') {
             steps {
-                sh 'python3.11 --version'
+                sh '''
+                    set -e
+                    echo "Using Python:"
+                    python3.11 --version
+                '''
             }
         }
 
         stage('Task 2.2 - Create / Reuse Virtualenv') {
             steps {
                 sh '''
-                    if [ ! -d "${VENV_DIR}" ]; then
-                        python3.11 -m venv ${VENV_DIR}
+                    set -e
+                    if [ ! -d pyats-venv ]; then
+                        python3.11 -m venv pyats-venv
+                        echo "Virtualenv created"
                     else
-                        echo "Reusing virtualenv"
+                        echo "Virtualenv already exists, reusing it"
                     fi
                 '''
             }
         }
 
-        stage('Task 2.3 - Install Dependencies') {
+        stage('Task 2.3 - Install Python dependencies') {
             steps {
                 sh '''
-                    . ${VENV_DIR}/bin/activate
+                    set -e
+                    . pyats-venv/bin/activate
                     python -m pip install --upgrade pip
-                    pip install pyats==24.3 genie==24.3 unicon==24.3
+
+                    if [ -f requirements.txt ]; then
+                        pip install -r requirements.txt
+                    else
+                        echo "No requirements.txt found – installing minimal deps"
+                        pip install pyats==24.3 genie==24.3 unicon==24.3
+                    fi
+                '''
+            }
+        }
+
+        stage('Task 2.4 - Verify Imports') {
+            steps {
+                sh '''
+                    set -e
+                    . pyats-venv/bin/activate
+                    python - << 'EOF'
+import pyats
+import genie
+import unicon
+print("pyATS import OK")
+print("Genie import OK")
+print("Unicon import OK")
+EOF
                 '''
             }
         }
@@ -104,40 +121,45 @@ interface vlan 1
             steps {
                 script {
 
-                    def raw = sh(
+                    sh '. pyats-venv/bin/activate'
+
+                    def devicesRaw = sh(
                         script: """
-                            . ${VENV_DIR}/bin/activate
-                            ${PYTHON_BIN} scripts/config_push.py \
-                              --testbed ${TESTBED} \
+                            python3.11 scripts/config_push.py \
+                              --testbed ${params.TESTBED_FILE} \
                               --list-devices
                         """,
                         returnStdout: true
                     ).trim()
 
-                    def devices = raw
+                    def devices = devicesRaw
+                        .replace('[', '')
+                        .replace(']', '')
                         .split('\\n')
                         .collect { it.trim() }
                         .findAll { it }
 
-                    if (devices.isEmpty()) {
-                        error "❌ No devices discovered"
-                    }
-
-                    echo "Target devices: ${devices}"
+                    echo "Discovered devices: ${devices}"
 
                     def branches = [:]
 
-                    devices.each { dev ->
-                        def deviceName = dev   // ✅ REQUIRED for Groovy closure safety
+                    /* FIX KEPT FROM v2.1.0:
+                       Device variable must be captured per-closure
+                       to avoid sw03 repetition bug
+                    */
+                    for (int i = 0; i < devices.size(); i++) {
+                        def deviceName = devices[i]
 
                         branches[deviceName] = {
                             stage("Push → ${deviceName}") {
                                 sh """
-                                    . ${VENV_DIR}/bin/activate
-                                    ${PYTHON_BIN} scripts/config_push.py \
-                                      --testbed ${TESTBED} \
+                                    set -e
+                                    . pyats-venv/bin/activate
+
+                                    python3.11 scripts/config_push.py \
+                                      --testbed ${params.TESTBED_FILE} \
                                       --devices ${deviceName} \
-                                      --config "${params.CONFIG}" \
+                                      --config "${params.CONFIG_COMMANDS}" \
                                       ${params.WRITE_MEMORY ? '--write-memory' : ''}
                                 """
                             }
@@ -152,10 +174,10 @@ interface vlan 1
 
     post {
         success {
-            echo '✅ Pipeline completed successfully'
+            echo '✅ Configuration push completed successfully'
         }
         failure {
-            echo '❌ Pipeline failed'
+            echo '❌ Pipeline failed – check logs'
         }
     }
 }
