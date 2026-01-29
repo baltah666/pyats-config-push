@@ -1,27 +1,30 @@
 ---
 # ==========================================================
 # File: testbed_access_2960.yaml
-# Version: 2.1.0
-# Purpose:
-#   pyATS testbed for Cisco Catalyst 2960 access switches
+# Version: 2.1.1
 #
-# Notes:
-#   - Designed for Jenkins (non-interactive)
-#   - Uses legacy SSH algorithms required by old IOS
-#   - Credentials are static (use Jenkins Credentials later)
+# FIX IN THIS VERSION:
+# -------------------
+# ✔ Added explicit Unicon legacy handling:
+#     - connection_timeout
+#     - init_exec_commands
+#     - init_config_commands
+#
+# WHY THIS FIX IS REQUIRED:
+# ------------------------
+# Older Catalyst 2960 (IOS 15.2) may fail during Unicon
+# state transitions even when SSH legacy algorithms exist.
+# These settings force a clean "any" state bring-up.
 # ==========================================================
 
 testbed:
   name: Techit-Sweden
   alias: Techit-Sweden
 
-  # ----------------------------------------------------------
-  # Global credentials (applied to all devices)
-  # ----------------------------------------------------------
   credentials:
     default:
       username: admin
-      password: cisco   # TODO: replace with Jenkins credential binding
+      password: cisco   # TODO: replace with Jenkins credentials
 
   custom:
     owner: Abdulilah Baltah
@@ -33,11 +36,12 @@ testbed:
 devices:
 
   # ----------------------------------------------------------
-  # Access Switch 01
+  # Access Switch 01 (OLDEST IOS — REQUIRED EXTRA FIXES)
   # ----------------------------------------------------------
   home-lab-access-sw01:
     alias: home-lab-access-sw01
     os: ios
+    platform: c2960
     type: switch
 
     connections:
@@ -45,7 +49,7 @@ devices:
         protocol: ssh
         ip: 192.168.1.50
 
-        # Legacy SSH options required by old IOS (2960)
+        # 🔴 Legacy SSH (already correct)
         ssh_options: >
           -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null
@@ -55,13 +59,20 @@ devices:
           -o HostKeyAlgorithms=+ssh-rsa
           -o PubkeyAcceptedAlgorithms=+ssh-rsa
 
+        # ✅ NEW: Force Unicon to tolerate slow / old devices
+        connection_timeout: 60
+
+        # ✅ NEW: Prevent Unicon from failing during initial state
         arguments:
           learn_hostname: true
+          init_exec_commands:
+            - term length 0
+            - term width 0
+          init_config_commands: []
 
     custom:
       site: Home_Lab
       role: access-switch
-      platform: c2960
       netmiko_driver: cisco_ios
 
 
@@ -71,6 +82,7 @@ devices:
   home-lab-access-sw02:
     alias: home-lab-access-sw02
     os: ios
+    platform: c2960
     type: switch
 
     connections:
@@ -91,7 +103,6 @@ devices:
     custom:
       site: Home_Lab
       role: access-switch
-      platform: c2960
       netmiko_driver: cisco_ios
 
 
@@ -101,6 +112,7 @@ devices:
   home-lab-access-sw03:
     alias: home-lab-access-sw03
     os: ios
+    platform: c2960
     type: switch
 
     connections:
@@ -121,5 +133,4 @@ devices:
     custom:
       site: Home_Lab
       role: access-switch
-      platform: c2960
       netmiko_driver: cisco_ios
