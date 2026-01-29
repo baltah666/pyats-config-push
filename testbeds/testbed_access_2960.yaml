@@ -1,0 +1,125 @@
+---
+# ==========================================================
+# File: testbed_access_2960.yaml
+# Version: 2.1.0
+# Purpose:
+#   pyATS testbed for Cisco Catalyst 2960 access switches
+#
+# Notes:
+#   - Designed for Jenkins (non-interactive)
+#   - Uses legacy SSH algorithms required by old IOS
+#   - Credentials are static (use Jenkins Credentials later)
+# ==========================================================
+
+testbed:
+  name: Techit-Sweden
+  alias: Techit-Sweden
+
+  # ----------------------------------------------------------
+  # Global credentials (applied to all devices)
+  # ----------------------------------------------------------
+  credentials:
+    default:
+      username: admin
+      password: cisco   # TODO: replace with Jenkins credential binding
+
+  custom:
+    owner: Abdulilah Baltah
+    contacts: Abdulilah,baltah@vattenfall.com
+
+# ==========================================================
+# Devices
+# ==========================================================
+devices:
+
+  # ----------------------------------------------------------
+  # Access Switch 01
+  # ----------------------------------------------------------
+  home-lab-access-sw01:
+    alias: home-lab-access-sw01
+    os: ios
+    type: switch
+
+    connections:
+      cli:
+        protocol: ssh
+        ip: 192.168.1.50
+
+        # Legacy SSH options required by old IOS (2960)
+        ssh_options: >
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o KexAlgorithms=+diffie-hellman-group1-sha1
+          -o KexAlgorithms=+diffie-hellman-group14-sha1
+          -o KexAlgorithms=+diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=+ssh-rsa
+          -o PubkeyAcceptedAlgorithms=+ssh-rsa
+
+        arguments:
+          learn_hostname: true
+
+    custom:
+      site: Home_Lab
+      role: access-switch
+      platform: c2960
+      netmiko_driver: cisco_ios
+
+
+  # ----------------------------------------------------------
+  # Access Switch 02
+  # ----------------------------------------------------------
+  home-lab-access-sw02:
+    alias: home-lab-access-sw02
+    os: ios
+    type: switch
+
+    connections:
+      cli:
+        protocol: ssh
+        ip: 192.168.1.130
+        ssh_options: >
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o KexAlgorithms=+diffie-hellman-group1-sha1
+          -o KexAlgorithms=+diffie-hellman-group14-sha1
+          -o KexAlgorithms=+diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=+ssh-rsa
+          -o PubkeyAcceptedAlgorithms=+ssh-rsa
+        arguments:
+          learn_hostname: true
+
+    custom:
+      site: Home_Lab
+      role: access-switch
+      platform: c2960
+      netmiko_driver: cisco_ios
+
+
+  # ----------------------------------------------------------
+  # Access Switch 03
+  # ----------------------------------------------------------
+  home-lab-access-sw03:
+    alias: home-lab-access-sw03
+    os: ios
+    type: switch
+
+    connections:
+      cli:
+        protocol: ssh
+        ip: 192.168.1.51
+        ssh_options: >
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o KexAlgorithms=+diffie-hellman-group1-sha1
+          -o KexAlgorithms=+diffie-hellman-group14-sha1
+          -o KexAlgorithms=+diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=+ssh-rsa
+          -o PubkeyAcceptedAlgorithms=+ssh-rsa
+        arguments:
+          learn_hostname: true
+
+    custom:
+      site: Home_Lab
+      role: access-switch
+      platform: c2960
+      netmiko_driver: cisco_ios
