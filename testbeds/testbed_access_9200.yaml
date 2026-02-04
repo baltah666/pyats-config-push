@@ -1,0 +1,58 @@
+---
+# ==========================================================
+# File: testbed_access_9200.yaml
+# Version: 2.1.2
+#
+# FIX IN THIS VERSION:
+# -------------------
+# ✔ REMOVED diffie-hellman-group1-sha1
+# ✔ Force ONLY KEX algorithms actually supported by sw01
+#
+# ROOT CAUSE:
+# -----------
+# home-lab-access-sw01 (IOS 15.2) rejects group1 and fails
+# SSH negotiation BEFORE Unicon state handling.
+# ==========================================================
+
+testbed:
+  name: Techit-Sweden
+  alias: Techit-Sweden
+
+  credentials:
+    default:
+      username: admin
+      password: cisco
+
+  custom:
+    owner: Abdulilah Baltah
+    contacts: Abdulilah,baltah@vattenfall.com
+
+devices:
+
+  # ----------------------------------------------------------
+  # home-lab-core-sw01
+  # ----------------------------------------------------------
+  home-lab-core-sw01:
+    alias: home-lab-core-sw01
+    os: ios
+    platform: c9200
+    type: switch
+
+    connections:
+      cli:
+        protocol: ssh
+        ip: 192.168.1.52
+        ssh_options: >
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -o KexAlgorithms=diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+          -o HostKeyAlgorithms=ssh-rsa
+          -o PubkeyAcceptedAlgorithms=ssh-rsa
+        arguments:
+          learn_hostname: true
+
+    custom:
+      site: Home_Lab
+      role: access-switch
+      netmiko_driver: cisco_ios
+
