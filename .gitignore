@@ -1,0 +1,7 @@
+# --- Runtime / CI artifacts ---
+pyats-venv/
+logs/
+
+# --- Python ---
+__pycache__/
+*.pyc
