@@ -3,15 +3,6 @@
 # File: testbed_access_9200.yaml
 # Version: 2.1.2
 #
-# FIX IN THIS VERSION:
-# -------------------
-# ✔ REMOVED diffie-hellman-group1-sha1
-# ✔ Force ONLY KEX algorithms actually supported by sw01
-#
-# ROOT CAUSE:
-# -----------
-# home-lab-access-sw01 (IOS 15.2) rejects group1 and fails
-# SSH negotiation BEFORE Unicon state handling.
 # ==========================================================
 
 testbed:
