@@ -1,8 +1,19 @@
 ---
 # ==========================================================
 # File: testbed_access_9200.yaml
-# Version: 2.1.2
+# Version: 2.2.0
 #
+# PURPOSE:
+#   pyATS testbed for Cisco Catalyst 9200 (IOS-XE)
+#
+# FIX IN THIS VERSION:
+#   - REMOVED legacy SSH KEX algorithms (SHA1)
+#   - Allows modern SSH negotiation (curve25519 / sha256)
+#   - Fixes: "no matching key exchange method found"
+#
+# IMPORTANT:
+#   - Do NOT copy legacy 2960 SSH options into this file
+#   - IOS-XE handles secure crypto correctly by default
 # ==========================================================
 
 testbed:
@@ -12,7 +23,7 @@ testbed:
   credentials:
     default:
       username: admin
-      password: cisco
+      password: cisco   # TODO: move to Jenkins credentials
 
   custom:
     owner: Abdulilah Baltah
@@ -21,11 +32,11 @@ testbed:
 devices:
 
   # ----------------------------------------------------------
-  # home-lab-core-sw01
+  # Catalyst 9200 – Core / Access Switch
   # ----------------------------------------------------------
   home-lab-core-sw01:
     alias: home-lab-core-sw01
-    os: ios
+    os: iosxe
     platform: c9200
     type: switch
 
@@ -33,12 +44,14 @@ devices:
       cli:
         protocol: ssh
         ip: 192.168.1.52
+
+        # IMPORTANT:
+        # - No forced KexAlgorithms
+        # - Let SSH auto-negotiate secure methods
         ssh_options: >
           -o StrictHostKeyChecking=no
           -o UserKnownHostsFile=/dev/null
-          -o KexAlgorithms=diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
-          -o HostKeyAlgorithms=ssh-rsa
-          -o PubkeyAcceptedAlgorithms=ssh-rsa
+
         arguments:
           learn_hostname: true
 
@@ -46,4 +59,3 @@ devices:
       site: Home_Lab
       role: access-switch
       netmiko_driver: cisco_ios
-
