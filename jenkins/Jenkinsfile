@@ -1,185 +1,214 @@
 /*
 ===============================================================================
- Jenkinsfile – pyats-config-push-v2
+ Jenkinsfile – pyats-config-push
  Version : v2.6.0
 -------------------------------------------------------------------------------
  PURPOSE:
- - Push IOS configuration using pyATS + Genie
- - Supports MULTI-SELECT testbeds (checkbox UI)
- - Runs devices in parallel per testbed
+ - Push IOS configuration to network devices using pyATS + Genie
+ - Support MULTIPLE testbeds (checkbox selection)
+ - Run device config pushes in PARALLEL
+ - Clear, readable Blue Ocean visualization
 
- WHY THIS VERSION WORKS:
- - Active Choices parameters defined via `properties()` (REQUIRED)
- - Declarative pipeline kept clean
- - Fully Jenkins-compliant (no compilation errors)
+ WHAT'S NEW IN v2.6.0:
+ - Multi-select TESTBEDS via Extended Choice Parameter (checkbox UI)
+ - Parallel execution per DEVICE (not per testbed only)
+ - Blue Ocean shows DEVICE NAMES instead of YAML filenames
+ - Safe virtualenv reuse for Jenkins agents
 
  REQUIREMENTS:
- - Jenkins Active Choices Plugin
- - Python 3.11 on agent
+ - Jenkins plugins:
+     * Pipeline
+     * Extended Choice Parameter
+     * AnsiColor
+     * Timestamper
+ - Python 3.11 installed on Jenkins agent
 ===============================================================================
 */
 
-/***************************************************************************
- ACTIVE CHOICES PARAMETERS (MUST BE OUTSIDE pipeline {})
-***************************************************************************/
-properties([
-  parameters([
-
-    [
-      $class      : 'ChoiceParameter',
-      name        : 'TESTBEDS',
-      description : 'Select one or more pyATS testbed YAML files',
-      choiceType  : 'PT_CHECKBOX',
-      filterable  : true,
-      script      : [
-        $class: 'GroovyScript',
-        script: [
-          sandbox: true,
-          script: '''
-            return [
-              "testbeds/testbed_access_2960.yaml",
-              "testbeds/testbed_access_9200.yaml",
-              "testbeds/testbed_access_9300.yaml",
-              "testbeds/testbed_datacenter_n9k.yaml",
-              "testbeds/testbed_routers.yaml"
-            ]
-          '''
-        ],
-        fallbackScript: [
-          sandbox: true,
-          script: 'return ["ERROR_LOADING_TESTBEDS"]'
-        ]
-      ]
-    ],
-
-    text(
-      name: 'CONFIG_COMMANDS',
-      defaultValue: '',
-      description: 'Multiline IOS CLI configuration to push'
-    ),
-
-    booleanParam(
-      name: 'WRITE_MEMORY',
-      defaultValue: true,
-      description: 'Run "write memory" after pushing config'
-    )
-  ])
-])
-
-/***************************************************************************
- DECLARATIVE PIPELINE
-***************************************************************************/
 pipeline {
-  agent any
+    agent any
 
-  options {
-    timestamps()
-    ansiColor('xterm')
-  }
-
-  stages {
-
-    stage('Checkout SCM') {
-      steps {
-        checkout scm
-      }
+    options {
+        timestamps()
+        ansiColor('xterm')
     }
 
-    stage('Prepare Virtualenv') {
-      steps {
-        sh '''
-          set -e
-          if [ ! -d pyats-venv ]; then
-            python3.11 -m venv pyats-venv
-          fi
-          pyats-venv/bin/pip install --upgrade pip
-          pyats-venv/bin/pip install pyats==24.3 genie==24.3 unicon==24.3
-        '''
-      }
+    /***************************************************************************
+     PARAMETERS
+    ***************************************************************************/
+    parameters {
+
+        /*
+         ----------------------------------------------------------------------
+         CONFIG_COMMANDS
+         ----------------------------------------------------------------------
+         - Multiline IOS CLI configuration
+         - Sent exactly as entered
+        */
+        text(
+            name: 'CONFIG_COMMANDS',
+            defaultValue: '',
+            description: 'IOS CLI configuration to push (multi-line supported)'
+        )
+
+        /*
+         ----------------------------------------------------------------------
+         TESTBEDS (MULTI-SELECT CHECKBOX)
+         ----------------------------------------------------------------------
+         - Uses Extended Choice Parameter plugin
+         - Allows selecting multiple testbeds
+        */
+        extendedChoice(
+            name: 'TESTBEDS',
+            type: 'PT_CHECKBOX',
+            description: 'Select one or more target testbeds',
+            value: '''
+testbeds/testbed_access_9200.yaml,
+testbeds/testbed_access_9300.yaml,
+testbeds/testbed_access_2960.yaml,
+testbeds/testbed_datacenter_n9k.yaml,
+testbeds/testbed_routers.yaml
+''',
+            multiSelectDelimiter: ','
+        )
+
+        /*
+         ----------------------------------------------------------------------
+         WRITE_MEMORY
+         ----------------------------------------------------------------------
+         - Controls "write memory" after config push
+        */
+        booleanParam(
+            name: 'WRITE_MEMORY',
+            defaultValue: true,
+            description: 'Run "write memory" after pushing config'
+        )
     }
 
-    stage('Verify pyATS Environment') {
-      steps {
-        sh '''
-          set -e
-          pyats-venv/bin/python - << 'EOF'
-import pyats, genie, unicon
-print("pyATS environment OK")
-EOF
-        '''
-      }
+    /***************************************************************************
+     ENVIRONMENT
+    ***************************************************************************/
+    environment {
+        PYTHON_BIN = "/usr/bin/python3.11"
+        VENV_DIR   = "pyats-venv"
     }
 
-    stage('Push Config (All Testbeds)') {
-      steps {
-        script {
+    /***************************************************************************
+     STAGES
+    ***************************************************************************/
+    stages {
 
-          if (!params.TESTBEDS?.trim()) {
-            error "No testbeds selected!"
-          }
-
-          // Active Choices returns comma-separated string
-          def testbeds = params.TESTBEDS
-            .split(',')
-            .collect { it.trim() }
-            .findAll { it }
-
-          echo "Selected testbeds: ${testbeds}"
-
-          for (tb in testbeds) {
-
-            echo "Processing testbed: ${tb}"
-
-            def devicesRaw = sh(
-              script: """
-                pyats-venv/bin/python scripts/config_push.py \
-                  --testbed ${tb} \
-                  --list-devices
-              """,
-              returnStdout: true
-            ).trim()
-
-            def devices = devicesRaw
-              .split("\\n")
-              .collect { it.trim() }
-              .findAll { it }
-
-            if (devices.isEmpty()) {
-              echo "No devices found in ${tb}"
-              continue
+        stage('Checkout SCM') {
+            steps {
+                checkout scm
+                echo "✅ Repository checked out"
             }
-
-            def branches = [:]
-
-            for (d in devices) {
-              def deviceName = d
-              branches["${tb} → ${deviceName}"] = {
-                stage("Push → ${deviceName}") {
-                  sh """
-                    set -e
-                    pyats-venv/bin/python scripts/config_push.py \
-                      --testbed ${tb} \
-                      --devices ${deviceName} \
-                      --config "${params.CONFIG_COMMANDS}" \
-                      ${params.WRITE_MEMORY ? '--write-memory' : ''}
-                  """
-                }
-              }
-            }
-
-            parallel branches
-          }
         }
-      }
-    }
-  }
 
-  post {
-    success {
-      echo "✅ All selected testbeds completed successfully"
+        stage('Prepare Virtualenv') {
+            steps {
+                sh '''
+                set -e
+
+                if [ ! -d "${VENV_DIR}" ]; then
+                    ${PYTHON_BIN} -m venv ${VENV_DIR}
+                fi
+
+                ${VENV_DIR}/bin/pip install --upgrade pip
+                ${VENV_DIR}/bin/pip install pyats==24.3 genie==24.3 unicon==24.3
+                '''
+            }
+        }
+
+        stage('Verify pyATS Environment') {
+            steps {
+                sh '''
+                set -e
+                ${VENV_DIR}/bin/python - << 'EOF'
+import pyats, genie, unicon
+print("pyATS / Genie / Unicon OK")
+EOF
+                '''
+            }
+        }
+
+        /*
+         ----------------------------------------------------------------------
+         PUSH CONFIG (ALL TESTBEDS / ALL DEVICES)
+         ----------------------------------------------------------------------
+        */
+        stage('Push Config (All Testbeds)') {
+            steps {
+                script {
+
+                    if (!params.TESTBEDS?.trim()) {
+                        error "No testbeds selected!"
+                    }
+
+                    def testbeds = params.TESTBEDS.split(',').collect { it.trim() }
+                    def allBranches = [:]
+
+                    for (tb in testbeds) {
+
+                        // Discover devices per testbed
+                        def devicesRaw = sh(
+                            script: """
+                                ${VENV_DIR}/bin/python scripts/config_push.py \
+                                  --testbed ${tb} \
+                                  --list-devices
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        def devices = devicesRaw
+                            .split("\\n")
+                            .collect { it.trim() }
+                            .findAll { it }
+
+                        if (devices.isEmpty()) {
+                            echo "⚠️ No devices found in ${tb}"
+                            continue
+                        }
+
+                        for (device in devices) {
+
+                            // BLUE OCEAN FRIENDLY LABEL
+                            def label = "${device} (${tb.tokenize('/').last()})"
+
+                            allBranches[label] = {
+                                stage("Push → ${device}") {
+                                    sh """
+                                    set -e
+                                    ${VENV_DIR}/bin/python scripts/config_push.py \
+                                      --testbed ${tb} \
+                                      --devices ${device} \
+                                      --config "${params.CONFIG_COMMANDS}" \
+                                      ${params.WRITE_MEMORY ? '--write-memory' : ''}
+                                    """
+                                }
+                            }
+                        }
+                    }
+
+                    if (allBranches.isEmpty()) {
+                        error "No devices discovered from selected testbeds!"
+                    }
+
+                    parallel allBranches
+                }
+            }
+        }
     }
-    failure {
-      echo "❌ Pipeline failed"
+
+    /***************************************************************************
+     POST ACTIONS
+    ***************************************************************************/
+    post {
+        success {
+            echo "✅ Configuration pushed successfully to all devices"
+        }
+        failure {
+            echo "❌ Pipeline failed — check logs above"
+        }
     }
-  }
 }
