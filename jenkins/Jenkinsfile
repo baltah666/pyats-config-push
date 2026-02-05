@@ -1,27 +1,21 @@
 /*
 ===============================================================================
- Jenkinsfile – pyats-config-push-v2
- Version : v2.3.0
+ Jenkinsfile – pyats-config-push
+ Version : v2.3.1
 -------------------------------------------------------------------------------
+ FIX IN THIS VERSION:
+ - Replaced Active Choices (INVALID in Declarative Pipeline)
+ - Uses Declarative-safe choice() parameter
+ - Restores pipeline compatibility with Jenkinsfile-from-SCM
+
+ PREVIOUS FIXES:
+ - v2.2.1: Explicit pyats-venv/bin/python usage
+ - Fixed ModuleNotFoundError: pyats
+ - Stable parallel execution per device
+
  PURPOSE:
- - Push IOS configuration to multiple devices using pyATS + Genie
- - Run per-device in parallel
- - Safe Jenkins virtualenv handling
-
- WHAT'S NEW IN v2.3.0:
- - TESTBED_FILE converted from free-text to SELECT DROPDOWN
- - Uses Active Choices Plugin
- - Prevents typos & invalid testbed paths
- - Cleaner UI for operators
-
- PREVIOUS FIXES (v2.2.1):
- - Explicit pyats-venv/bin/python usage
- - Fixed "ModuleNotFoundError: pyats"
- - Jenkins-safe venv execution
-
- REQUIREMENTS:
- - Jenkins Active Choices Plugin
- - Python 3.11 available on Jenkins agent
+ - Push IOS configuration to multiple devices using pyATS
+ - Show per-device parallel execution graph
 ===============================================================================
 */
 
@@ -31,6 +25,7 @@ pipeline {
     options {
         timestamps()
         ansiColor('xterm')
+        disableConcurrentBuilds()
     }
 
     /***************************************************************************
@@ -40,29 +35,20 @@ pipeline {
 
         /*
          ----------------------------------------------------------------------
-         TESTBED_FILE (DROPDOWN)
+         TESTBED_FILE (DROPDOWN – Declarative SAFE)
          ----------------------------------------------------------------------
-         - Uses Active Choices Plugin
-         - Prevents manual typing errors
-         - List can be extended safely
+         - Static list (SCM-controlled)
+         - Prevents typos
+         - Jenkinsfile compatible
         */
-        activeChoiceParam('TESTBED_FILE') {
-            description('Select pyATS testbed YAML file')
-            choiceType('SINGLE_SELECT')
-
-            groovyScript {
-                script("""
-                    return [
-                        'testbeds/testbed_access_2960.yaml',
-                        'testbeds/testbed_access_9200.yaml',
-                        'testbeds/testbed_access_9300.yaml',
-                        'testbeds/testbed_datacenter_n9k.yaml',
-                        'testbeds/testbed_routers.yaml'
-                    ]
-                """)
-                fallbackScript("return ['ERROR_LOADING_TESTBEDS']")
-            }
-        }
+        choice(
+            name: 'TESTBED_FILE',
+            choices: [
+                'testbeds/testbed_access_2960.yaml',
+                'testbeds/testbed_access_9200.yaml'
+            ],
+            description: 'Select pyATS testbed YAML file'
+        )
 
         /*
          ----------------------------------------------------------------------
@@ -81,8 +67,8 @@ pipeline {
          ----------------------------------------------------------------------
          DEVICE_FILTER
          ----------------------------------------------------------------------
-         - ALL = push to all devices in testbed
-         - Or comma-separated list (future use)
+         - ALL = all devices
+         - Or comma-separated list
         */
         string(
             name: 'DEVICE_FILTER',
@@ -94,7 +80,7 @@ pipeline {
          ----------------------------------------------------------------------
          WRITE_MEMORY
          ----------------------------------------------------------------------
-         - Controls "write memory" after config push
+         - Controls "write memory"
         */
         booleanParam(
             name: 'WRITE_MEMORY',
@@ -114,18 +100,10 @@ pipeline {
             }
         }
 
-        /*
-         ----------------------------------------------------------------------
-         PREPARE VIRTUALENV
-         ----------------------------------------------------------------------
-         - Creates pyats-venv if missing
-         - Installs pinned pyATS stack
-        */
         stage('Prepare Virtualenv') {
             steps {
                 sh '''
                     set -e
-
                     if [ ! -d pyats-venv ]; then
                         python3.11 -m venv pyats-venv
                     fi
@@ -136,12 +114,6 @@ pipeline {
             }
         }
 
-        /*
-         ----------------------------------------------------------------------
-         VERIFY pyATS ENVIRONMENT
-         ----------------------------------------------------------------------
-         - Fails fast if pyATS stack is broken
-        */
         stage('Verify pyATS Environment') {
             steps {
                 sh '''
@@ -156,19 +128,11 @@ EOF
             }
         }
 
-        /*
-         ----------------------------------------------------------------------
-         PUSH CONFIG (PARALLEL PER DEVICE)
-         ----------------------------------------------------------------------
-         - Discovers devices dynamically from testbed
-         - Creates one parallel branch per device
-         - Each device gets isolated execution
-        */
         stage('Push Config (Parallel per Device)') {
             steps {
                 script {
 
-                    // Discover devices from testbed
+                    // Discover devices
                     def devicesRaw = sh(
                         script: """
                             pyats-venv/bin/python scripts/config_push.py \
@@ -189,9 +153,7 @@ EOF
 
                     def branches = [:]
 
-                    for (int i = 0; i < devices.size(); i++) {
-                        def deviceName = devices[i]
-
+                    for (String deviceName : devices) {
                         branches[deviceName] = {
                             stage("Push → ${deviceName}") {
                                 sh """
@@ -213,7 +175,7 @@ EOF
     }
 
     /***************************************************************************
-     POST ACTIONS
+     POST
     ***************************************************************************/
     post {
         success {
