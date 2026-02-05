@@ -1,12 +1,27 @@
 /*
 ===============================================================================
- Jenkinsfile – pyats-config-push
- Version : v2.2.1
+ Jenkinsfile – pyats-config-push-v2
+ Version : v2.3.0
 -------------------------------------------------------------------------------
- FIX IN THIS VERSION:
- - Use pyats-venv/bin/python explicitly
- - ELIMINATES "ModuleNotFoundError: pyats"
- - Jenkins-safe virtualenv execution
+ PURPOSE:
+ - Push IOS configuration to multiple devices using pyATS + Genie
+ - Run per-device in parallel
+ - Safe Jenkins virtualenv handling
+
+ WHAT'S NEW IN v2.3.0:
+ - TESTBED_FILE converted from free-text to SELECT DROPDOWN
+ - Uses Active Choices Plugin
+ - Prevents typos & invalid testbed paths
+ - Cleaner UI for operators
+
+ PREVIOUS FIXES (v2.2.1):
+ - Explicit pyats-venv/bin/python usage
+ - Fixed "ModuleNotFoundError: pyats"
+ - Jenkins-safe venv execution
+
+ REQUIREMENTS:
+ - Jenkins Active Choices Plugin
+ - Python 3.11 available on Jenkins agent
 ===============================================================================
 */
 
@@ -18,25 +33,69 @@ pipeline {
         ansiColor('xterm')
     }
 
+    /***************************************************************************
+     PARAMETERS
+    ***************************************************************************/
     parameters {
-        string(
-            name: 'TESTBED_FILE',
-            defaultValue: 'testbeds/testbed_access_2960.yaml',
-            description: 'Path to pyATS testbed YAML file'
-        )
 
+        /*
+         ----------------------------------------------------------------------
+         TESTBED_FILE (DROPDOWN)
+         ----------------------------------------------------------------------
+         - Uses Active Choices Plugin
+         - Prevents manual typing errors
+         - List can be extended safely
+        */
+        activeChoiceParam('TESTBED_FILE') {
+            description('Select pyATS testbed YAML file')
+            choiceType('SINGLE_SELECT')
+
+            groovyScript {
+                script("""
+                    return [
+                        'testbeds/testbed_access_2960.yaml',
+                        'testbeds/testbed_access_9200.yaml',
+                        'testbeds/testbed_access_9300.yaml',
+                        'testbeds/testbed_datacenter_n9k.yaml',
+                        'testbeds/testbed_routers.yaml'
+                    ]
+                """)
+                fallbackScript("return ['ERROR_LOADING_TESTBEDS']")
+            }
+        }
+
+        /*
+         ----------------------------------------------------------------------
+         CONFIG_COMMANDS
+         ----------------------------------------------------------------------
+         - Multiline IOS CLI config
+         - Sent exactly as entered
+        */
         text(
             name: 'CONFIG_COMMANDS',
             defaultValue: '',
             description: 'Multiline IOS CLI configuration to push'
         )
 
+        /*
+         ----------------------------------------------------------------------
+         DEVICE_FILTER
+         ----------------------------------------------------------------------
+         - ALL = push to all devices in testbed
+         - Or comma-separated list (future use)
+        */
         string(
             name: 'DEVICE_FILTER',
             defaultValue: 'ALL',
             description: 'Comma-separated device list OR ALL'
         )
 
+        /*
+         ----------------------------------------------------------------------
+         WRITE_MEMORY
+         ----------------------------------------------------------------------
+         - Controls "write memory" after config push
+        */
         booleanParam(
             name: 'WRITE_MEMORY',
             defaultValue: true,
@@ -44,6 +103,9 @@ pipeline {
         )
     }
 
+    /***************************************************************************
+     STAGES
+    ***************************************************************************/
     stages {
 
         stage('Checkout SCM') {
@@ -52,10 +114,18 @@ pipeline {
             }
         }
 
+        /*
+         ----------------------------------------------------------------------
+         PREPARE VIRTUALENV
+         ----------------------------------------------------------------------
+         - Creates pyats-venv if missing
+         - Installs pinned pyATS stack
+        */
         stage('Prepare Virtualenv') {
             steps {
                 sh '''
                     set -e
+
                     if [ ! -d pyats-venv ]; then
                         python3.11 -m venv pyats-venv
                     fi
@@ -66,6 +136,12 @@ pipeline {
             }
         }
 
+        /*
+         ----------------------------------------------------------------------
+         VERIFY pyATS ENVIRONMENT
+         ----------------------------------------------------------------------
+         - Fails fast if pyATS stack is broken
+        */
         stage('Verify pyATS Environment') {
             steps {
                 sh '''
@@ -74,16 +150,25 @@ pipeline {
 import pyats
 import genie
 import unicon
-print("pyATS OK")
+print("pyATS environment OK")
 EOF
                 '''
             }
         }
 
+        /*
+         ----------------------------------------------------------------------
+         PUSH CONFIG (PARALLEL PER DEVICE)
+         ----------------------------------------------------------------------
+         - Discovers devices dynamically from testbed
+         - Creates one parallel branch per device
+         - Each device gets isolated execution
+        */
         stage('Push Config (Parallel per Device)') {
             steps {
                 script {
 
+                    // Discover devices from testbed
                     def devicesRaw = sh(
                         script: """
                             pyats-venv/bin/python scripts/config_push.py \
@@ -97,6 +182,10 @@ EOF
                         .split("\\n")
                         .collect { it.trim() }
                         .findAll { it }
+
+                    if (devices.isEmpty()) {
+                        error "No devices discovered from testbed!"
+                    }
 
                     def branches = [:]
 
@@ -123,6 +212,9 @@ EOF
         }
     }
 
+    /***************************************************************************
+     POST ACTIONS
+    ***************************************************************************/
     post {
         success {
             echo "✅ All devices completed successfully"
