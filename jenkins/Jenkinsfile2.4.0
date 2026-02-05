@@ -1,0 +1,182 @@
+/*
+===============================================================================
+ Jenkinsfile – pyats-config-push
+ Version : v2.4.0
+-------------------------------------------------------------------------------
+ NEW IN v2.4.0:
+ - Supports MULTIPLE testbed YAML files in ONE run
+ - Uses comma-separated TESTBED_FILES parameter
+ - Fully Declarative-safe (no forbidden plugins)
+ - Each testbed is processed independently
+ - Parallel execution preserved per device
+
+ WHY THIS DESIGN:
+ - Jenkins Declarative Pipelines do NOT support multi-select dropdowns
+ - This is the cleanest and most reliable workaround
+===============================================================================
+*/
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+
+    /***************************************************************************
+     PARAMETERS
+    ***************************************************************************/
+    parameters {
+
+        /*
+         ----------------------------------------------------------------------
+         TESTBED_FILES (MULTI-TESTBED SUPPORT)
+         ----------------------------------------------------------------------
+         - Comma-separated list of testbed YAML files
+         - Example:
+           testbeds/testbed_access_2960.yaml,testbeds/testbed_access_9200.yaml
+        */
+        string(
+            name: 'TESTBED_FILES',
+            defaultValue: 'testbeds/testbed_access_2960.yaml',
+            description: 'Comma-separated pyATS testbed YAML files'
+        )
+
+        text(
+            name: 'CONFIG_COMMANDS',
+            defaultValue: '',
+            description: 'Multiline IOS CLI configuration to push'
+        )
+
+        string(
+            name: 'DEVICE_FILTER',
+            defaultValue: 'ALL',
+            description: 'Comma-separated device list OR ALL'
+        )
+
+        booleanParam(
+            name: 'WRITE_MEMORY',
+            defaultValue: true,
+            description: 'Run "write memory" after pushing config'
+        )
+    }
+
+    /***************************************************************************
+     STAGES
+    ***************************************************************************/
+    stages {
+
+        stage('Checkout SCM') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Prepare Virtualenv') {
+            steps {
+                sh '''
+                    set -e
+                    if [ ! -d pyats-venv ]; then
+                        python3.11 -m venv pyats-venv
+                    fi
+
+                    pyats-venv/bin/pip install --upgrade pip
+                    pyats-venv/bin/pip install pyats==24.3 genie==24.3 unicon==24.3
+                '''
+            }
+        }
+
+        stage('Verify pyATS Environment') {
+            steps {
+                sh '''
+                    set -e
+                    pyats-venv/bin/python - << 'EOF'
+import pyats, genie, unicon
+print("pyATS environment OK")
+EOF
+                '''
+            }
+        }
+
+        stage('Push Config (Multi-Testbed)') {
+            steps {
+                script {
+
+                    // Parse testbeds
+                    def testbeds = params.TESTBED_FILES
+                        .split(',')
+                        .collect { it.trim() }
+                        .findAll { it }
+
+                    if (testbeds.isEmpty()) {
+                        error "No testbeds provided!"
+                    }
+
+                    def allBranches = [:]
+
+                    for (String testbed : testbeds) {
+
+                        allBranches["Testbed → ${testbed}"] = {
+
+                            stage("Testbed → ${testbed}") {
+
+                                def devicesRaw = sh(
+                                    script: """
+                                        pyats-venv/bin/python scripts/config_push.py \
+                                          --testbed ${testbed} \
+                                          --list-devices
+                                    """,
+                                    returnStdout: true
+                                ).trim()
+
+                                def devices = devicesRaw
+                                    .split("\\n")
+                                    .collect { it.trim() }
+                                    .findAll { it }
+
+                                if (devices.isEmpty()) {
+                                    error "No devices found in ${testbed}"
+                                }
+
+                                def deviceBranches = [:]
+
+                                for (String device : devices) {
+                                    deviceBranches[device] = {
+                                        stage("Push → ${device}") {
+                                            sh """
+                                                set -e
+                                                pyats-venv/bin/python scripts/config_push.py \
+                                                  --testbed ${testbed} \
+                                                  --devices ${device} \
+                                                  --config "${params.CONFIG_COMMANDS}" \
+                                                  ${params.WRITE_MEMORY ? '--write-memory' : ''}
+                                            """
+                                        }
+                                    }
+                                }
+
+                                parallel deviceBranches
+                            }
+                        }
+                    }
+
+                    parallel allBranches
+                }
+            }
+        }
+    }
+
+    /***************************************************************************
+     POST
+    ***************************************************************************/
+    post {
+        success {
+            echo "✅ All testbeds and devices completed successfully"
+        }
+        failure {
+            echo "❌ Pipeline failed"
+        }
+    }
+}

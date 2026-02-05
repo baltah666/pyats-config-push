@@ -1,18 +1,36 @@
 /*
 ===============================================================================
- Jenkinsfile – pyats-config-push
- Version : v2.4.0
+ Jenkinsfile – pyats-config-push-v2
+ Version : v2.5.0
 -------------------------------------------------------------------------------
- NEW IN v2.4.0:
- - Supports MULTIPLE testbed YAML files in ONE run
- - Uses comma-separated TESTBED_FILES parameter
- - Fully Declarative-safe (no forbidden plugins)
- - Each testbed is processed independently
- - Parallel execution preserved per device
+ PURPOSE:
+ - Push IOS configuration to multiple devices using pyATS + Genie
+ - Support MULTIPLE testbeds selected at once (checkbox style)
+ - Run per-device in parallel (inside each testbed)
+ - Safe Jenkins virtualenv handling
 
- WHY THIS DESIGN:
- - Jenkins Declarative Pipelines do NOT support multi-select dropdowns
- - This is the cleanest and most reliable workaround
+ WHAT'S NEW IN v2.5.0:
+ - TESTBEDS parameter is now a MULTI-SELECT CHECKBOX list
+ - Operator can select ONE or MORE testbed YAML files
+ - Jenkins will loop testbeds sequentially
+ - Devices inside each testbed run in PARALLEL
+ - Matches requested UI style (checkbox list)
+
+ PREVIOUS FIXES:
+ v2.4.0
+ - Stable pipeline structure
+ - Clean git handling
+
+ v2.3.0
+ - Introduced Active Choices (single-select)
+
+ v2.2.1
+ - Explicit pyats-venv/bin/python usage
+ - Fixed "ModuleNotFoundError: pyats"
+
+ REQUIREMENTS:
+ - Jenkins Active Choices Plugin
+ - Python 3.11 available on Jenkins agent
 ===============================================================================
 */
 
@@ -22,7 +40,6 @@ pipeline {
     options {
         timestamps()
         ansiColor('xterm')
-        disableConcurrentBuilds()
     }
 
     /***************************************************************************
@@ -32,30 +49,57 @@ pipeline {
 
         /*
          ----------------------------------------------------------------------
-         TESTBED_FILES (MULTI-TESTBED SUPPORT)
+         TESTBEDS (MULTI-SELECT CHECKBOX)
          ----------------------------------------------------------------------
-         - Comma-separated list of testbed YAML files
-         - Example:
-           testbeds/testbed_access_2960.yaml,testbeds/testbed_access_9200.yaml
+         - Uses Active Choices Plugin
+         - Allows selecting ONE or MORE testbeds
+         - Values returned as comma-separated string
         */
-        string(
-            name: 'TESTBED_FILES',
-            defaultValue: 'testbeds/testbed_access_2960.yaml',
-            description: 'Comma-separated pyATS testbed YAML files'
-        )
+        activeChoiceParam('TESTBEDS') {
+            description('Select one or more target testbeds')
+            choiceType('CHECKBOX')
 
+            groovyScript {
+                script("""
+                    return [
+                        'testbeds/testbed_access_2960.yaml',
+                        'testbeds/testbed_access_9200.yaml',
+                        'testbeds/testbed_access_9300.yaml',
+                        'testbeds/testbed_datacenter_n9k.yaml',
+                        'testbeds/testbed_routers.yaml'
+                    ]
+                """)
+                fallbackScript("return ['ERROR_LOADING_TESTBEDS']")
+            }
+        }
+
+        /*
+         ----------------------------------------------------------------------
+         CONFIG_COMMANDS
+         ----------------------------------------------------------------------
+        */
         text(
             name: 'CONFIG_COMMANDS',
             defaultValue: '',
             description: 'Multiline IOS CLI configuration to push'
         )
 
+        /*
+         ----------------------------------------------------------------------
+         DEVICE_FILTER
+         ----------------------------------------------------------------------
+        */
         string(
             name: 'DEVICE_FILTER',
             defaultValue: 'ALL',
             description: 'Comma-separated device list OR ALL'
         )
 
+        /*
+         ----------------------------------------------------------------------
+         WRITE_MEMORY
+         ----------------------------------------------------------------------
+        */
         booleanParam(
             name: 'WRITE_MEMORY',
             defaultValue: true,
@@ -81,7 +125,6 @@ pipeline {
                     if [ ! -d pyats-venv ]; then
                         python3.11 -m venv pyats-venv
                     fi
-
                     pyats-venv/bin/pip install --upgrade pip
                     pyats-venv/bin/pip install pyats==24.3 genie==24.3 unicon==24.3
                 '''
@@ -100,80 +143,80 @@ EOF
             }
         }
 
-        stage('Push Config (Multi-Testbed)') {
+        /*
+         ----------------------------------------------------------------------
+         MAIN EXECUTION
+         ----------------------------------------------------------------------
+         - Loop over selected testbeds
+         - Devices inside each testbed run in parallel
+        */
+        stage('Push Config (Per Testbed)') {
             steps {
                 script {
 
-                    // Parse testbeds
-                    def testbeds = params.TESTBED_FILES
+                    if (!params.TESTBEDS?.trim()) {
+                        error "No testbeds selected!"
+                    }
+
+                    def testbeds = params.TESTBEDS
                         .split(',')
                         .collect { it.trim() }
                         .findAll { it }
 
-                    if (testbeds.isEmpty()) {
-                        error "No testbeds provided!"
-                    }
+                    for (tb in testbeds) {
 
-                    def allBranches = [:]
+                        stage("Testbed → ${tb}") {
 
-                    for (String testbed : testbeds) {
+                            def devicesRaw = sh(
+                                script: """
+                                    pyats-venv/bin/python scripts/config_push.py \
+                                      --testbed ${tb} \
+                                      --list-devices
+                                """,
+                                returnStdout: true
+                            ).trim()
 
-                        allBranches["Testbed → ${testbed}"] = {
+                            def devices = devicesRaw
+                                .split("\\n")
+                                .collect { it.trim() }
+                                .findAll { it }
 
-                            stage("Testbed → ${testbed}") {
+                            if (devices.isEmpty()) {
+                                error "No devices found in ${tb}"
+                            }
 
-                                def devicesRaw = sh(
-                                    script: """
-                                        pyats-venv/bin/python scripts/config_push.py \
-                                          --testbed ${testbed} \
-                                          --list-devices
-                                    """,
-                                    returnStdout: true
-                                ).trim()
+                            def branches = [:]
 
-                                def devices = devicesRaw
-                                    .split("\\n")
-                                    .collect { it.trim() }
-                                    .findAll { it }
-
-                                if (devices.isEmpty()) {
-                                    error "No devices found in ${testbed}"
-                                }
-
-                                def deviceBranches = [:]
-
-                                for (String device : devices) {
-                                    deviceBranches[device] = {
-                                        stage("Push → ${device}") {
-                                            sh """
-                                                set -e
-                                                pyats-venv/bin/python scripts/config_push.py \
-                                                  --testbed ${testbed} \
-                                                  --devices ${device} \
-                                                  --config "${params.CONFIG_COMMANDS}" \
-                                                  ${params.WRITE_MEMORY ? '--write-memory' : ''}
-                                            """
-                                        }
+                            for (d in devices) {
+                                def deviceName = d
+                                branches[deviceName] = {
+                                    stage("Push → ${deviceName}") {
+                                        sh """
+                                            set -e
+                                            pyats-venv/bin/python scripts/config_push.py \
+                                              --testbed ${tb} \
+                                              --devices ${deviceName} \
+                                              --config "${params.CONFIG_COMMANDS}" \
+                                              ${params.WRITE_MEMORY ? '--write-memory' : ''}
+                                        """
                                     }
                                 }
-
-                                parallel deviceBranches
                             }
+
+                            parallel branches
                         }
                     }
-
-                    parallel allBranches
                 }
             }
         }
     }
 
     /***************************************************************************
-     POST
+     POST ACTIONS
     ***************************************************************************/
     post {
         success {
-            echo "✅ All testbeds and devices completed successfully"
+            echo "✅ All selected testbeds completed successfully"
         }
         failure {
             echo "❌ Pipeline failed"
