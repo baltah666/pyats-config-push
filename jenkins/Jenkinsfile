@@ -1,21 +1,18 @@
 /*
 ===============================================================================
  Jenkinsfile – pyats-config-push
- Version : v2.3.1
+ Version : v2.4.0
 -------------------------------------------------------------------------------
- FIX IN THIS VERSION:
- - Replaced Active Choices (INVALID in Declarative Pipeline)
- - Uses Declarative-safe choice() parameter
- - Restores pipeline compatibility with Jenkinsfile-from-SCM
+ NEW IN v2.4.0:
+ - Supports MULTIPLE testbed YAML files in ONE run
+ - Uses comma-separated TESTBED_FILES parameter
+ - Fully Declarative-safe (no forbidden plugins)
+ - Each testbed is processed independently
+ - Parallel execution preserved per device
 
- PREVIOUS FIXES:
- - v2.2.1: Explicit pyats-venv/bin/python usage
- - Fixed ModuleNotFoundError: pyats
- - Stable parallel execution per device
-
- PURPOSE:
- - Push IOS configuration to multiple devices using pyATS
- - Show per-device parallel execution graph
+ WHY THIS DESIGN:
+ - Jenkins Declarative Pipelines do NOT support multi-select dropdowns
+ - This is the cleanest and most reliable workaround
 ===============================================================================
 */
 
@@ -35,53 +32,30 @@ pipeline {
 
         /*
          ----------------------------------------------------------------------
-         TESTBED_FILE (DROPDOWN – Declarative SAFE)
+         TESTBED_FILES (MULTI-TESTBED SUPPORT)
          ----------------------------------------------------------------------
-         - Static list (SCM-controlled)
-         - Prevents typos
-         - Jenkinsfile compatible
+         - Comma-separated list of testbed YAML files
+         - Example:
+           testbeds/testbed_access_2960.yaml,testbeds/testbed_access_9200.yaml
         */
-        choice(
-            name: 'TESTBED_FILE',
-            choices: [
-                'testbeds/testbed_access_2960.yaml',
-                'testbeds/testbed_access_9200.yaml'
-            ],
-            description: 'Select pyATS testbed YAML file'
+        string(
+            name: 'TESTBED_FILES',
+            defaultValue: 'testbeds/testbed_access_2960.yaml',
+            description: 'Comma-separated pyATS testbed YAML files'
         )
 
-        /*
-         ----------------------------------------------------------------------
-         CONFIG_COMMANDS
-         ----------------------------------------------------------------------
-         - Multiline IOS CLI config
-         - Sent exactly as entered
-        */
         text(
             name: 'CONFIG_COMMANDS',
             defaultValue: '',
             description: 'Multiline IOS CLI configuration to push'
         )
 
-        /*
-         ----------------------------------------------------------------------
-         DEVICE_FILTER
-         ----------------------------------------------------------------------
-         - ALL = all devices
-         - Or comma-separated list
-        */
         string(
             name: 'DEVICE_FILTER',
             defaultValue: 'ALL',
             description: 'Comma-separated device list OR ALL'
         )
 
-        /*
-         ----------------------------------------------------------------------
-         WRITE_MEMORY
-         ----------------------------------------------------------------------
-         - Controls "write memory"
-        */
         booleanParam(
             name: 'WRITE_MEMORY',
             defaultValue: true,
@@ -119,56 +93,76 @@ pipeline {
                 sh '''
                     set -e
                     pyats-venv/bin/python - << 'EOF'
-import pyats
-import genie
-import unicon
+import pyats, genie, unicon
 print("pyATS environment OK")
 EOF
                 '''
             }
         }
 
-        stage('Push Config (Parallel per Device)') {
+        stage('Push Config (Multi-Testbed)') {
             steps {
                 script {
 
-                    // Discover devices
-                    def devicesRaw = sh(
-                        script: """
-                            pyats-venv/bin/python scripts/config_push.py \
-                              --testbed ${params.TESTBED_FILE} \
-                              --list-devices
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    def devices = devicesRaw
-                        .split("\\n")
+                    // Parse testbeds
+                    def testbeds = params.TESTBED_FILES
+                        .split(',')
                         .collect { it.trim() }
                         .findAll { it }
 
-                    if (devices.isEmpty()) {
-                        error "No devices discovered from testbed!"
+                    if (testbeds.isEmpty()) {
+                        error "No testbeds provided!"
                     }
 
-                    def branches = [:]
+                    def allBranches = [:]
 
-                    for (String deviceName : devices) {
-                        branches[deviceName] = {
-                            stage("Push → ${deviceName}") {
-                                sh """
-                                    set -e
-                                    pyats-venv/bin/python scripts/config_push.py \
-                                      --testbed ${params.TESTBED_FILE} \
-                                      --devices ${deviceName} \
-                                      --config "${params.CONFIG_COMMANDS}" \
-                                      ${params.WRITE_MEMORY ? '--write-memory' : ''}
-                                """
+                    for (String testbed : testbeds) {
+
+                        allBranches["Testbed → ${testbed}"] = {
+
+                            stage("Testbed → ${testbed}") {
+
+                                def devicesRaw = sh(
+                                    script: """
+                                        pyats-venv/bin/python scripts/config_push.py \
+                                          --testbed ${testbed} \
+                                          --list-devices
+                                    """,
+                                    returnStdout: true
+                                ).trim()
+
+                                def devices = devicesRaw
+                                    .split("\\n")
+                                    .collect { it.trim() }
+                                    .findAll { it }
+
+                                if (devices.isEmpty()) {
+                                    error "No devices found in ${testbed}"
+                                }
+
+                                def deviceBranches = [:]
+
+                                for (String device : devices) {
+                                    deviceBranches[device] = {
+                                        stage("Push → ${device}") {
+                                            sh """
+                                                set -e
+                                                pyats-venv/bin/python scripts/config_push.py \
+                                                  --testbed ${testbed} \
+                                                  --devices ${device} \
+                                                  --config "${params.CONFIG_COMMANDS}" \
+                                                  ${params.WRITE_MEMORY ? '--write-memory' : ''}
+                                            """
+                                        }
+                                    }
+                                }
+
+                                parallel deviceBranches
                             }
                         }
                     }
 
-                    parallel branches
+                    parallel allBranches
                 }
             }
         }
@@ -179,7 +173,7 @@ EOF
     ***************************************************************************/
     post {
         success {
-            echo "✅ All devices completed successfully"
+            echo "✅ All testbeds and devices completed successfully"
         }
         failure {
             echo "❌ Pipeline failed"
